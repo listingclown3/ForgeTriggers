@@ -5,98 +5,133 @@ console.log('WebSocket server is running on ws://localhost:8080');
 // Store all connected clients
 const clients = new Set();
 
-// Optional: Assign unique IDs to clients for better logging/sender ID
-let nextClientId = 1;
+let nextClientId = 1; // Used for temporary IDs
 
 wss.on('connection', (ws) => {
-  // Assign an ID for logging purposes (optional)
-  ws.clientId = `client_${nextClientId++}`;
-  console.log(`New client connected: ${ws.clientId}`);
-  clients.add(ws);
+    // Assign a temporary ID until the client identifies itself
+    ws.clientId = `pending_${nextClientId++}`;
+    ws.isIdentified = false;
+    console.log(`New connection opened: ${ws.clientId}`);
+    clients.add(ws);
 
-  // Send welcome message
-  ws.send(JSON.stringify({
-    type: 'system',
-    sender: 'server',
-    content: `Welcome ${ws.clientId} to the WebSocket server`
-  }));
-
-  ws.on('message', (message) => {
-    const textMessage = message.toString();
-    console.log(`Raw message received from ${ws.clientId}:`, textMessage);
-
-    try {
-      const parsedMessage = JSON.parse(textMessage);
-
-      // Assign sender if not provided by client message (use our assigned ID)
-      // Note: ChatTriggers now sends "sender":"ChatTriggers" for GOTO
-      parsedMessage.sender = parsedMessage.sender || ws.clientId;
-
-      // Add server timestamp
-      parsedMessage.timestamp = Date.now();
-
-      let messageToSend = null; // The JSON string to be sent/broadcast
-      let broadcast = true; // Default to broadcasting
-      let logSpecific = true; // Flag to avoid double logging
-
-      // --- Specific Message Type Handling ---
-      if (parsedMessage.type === 'action' && parsedMessage.action === 'GOTO') {
-          console.log(`>>> Received GOTO command from ${parsedMessage.sender} for X:${parsedMessage.data?.x} Y:${parsedMessage.data?.y} Z:${parsedMessage.data?.z}`);
-          // Decide handling: Here we broadcast it so any listening client (like a bot) can react.
-          messageToSend = JSON.stringify(parsedMessage);
-          broadcast = true; // Ensure it's broadcast
-          logSpecific = false; // Already logged details
-
-      } else if (parsedMessage.type === 'doorLocations') {
-          const doorCount = Array.isArray(parsedMessage.doors) ? parsedMessage.doors.length : 0;
-          console.log(`>>> Received doorLocations update from ${parsedMessage.sender} (${doorCount} doors)`);
-          // Decide handling: Broadcast so other clients might see the locations?
-          messageToSend = JSON.stringify(parsedMessage);
-          broadcast = true; // Ensure it's broadcast
-          logSpecific = false; // Already logged details
-
-      } else {
-          // Handle other standard messages (chat, status, etc.)
-          broadcast = true; // Broadcast these by default
-          messageToSend = JSON.stringify(parsedMessage);
-      }
-      // --- End Specific Handling ---
-
-
-      // Log the processed message if not already logged specifically
-      if(logSpecific) {
-        console.log(`Processing message from ${parsedMessage.sender}:`, parsedMessage);
-      }
-
-      // Broadcast the message if needed
-      if (broadcast && messageToSend) {
-        // console.log(`Broadcasting message type: ${parsedMessage.type}`); // Debug log
-        for (const client of clients) {
-          // Optional: Don't send back to sender? (Usually you do for confirmation/sync)
-          // if (client !== ws && client.readyState === WebSocket.OPEN) {
-          if (client.readyState === WebSocket.OPEN) {
-            client.send(messageToSend);
-          }
-        }
-      }
-
-    } catch (e) {
-      console.error(`Invalid JSON received from ${ws.clientId}:`, textMessage, e);
-      ws.send(JSON.stringify({
-        type: 'error',
+    // Send a standard welcome message to the newly connected client
+    ws.send(JSON.stringify({
+        type: 'system',
         sender: 'server',
-        content: 'Invalid JSON message format received.'
-      }));
-    }
-  });
+        content: 'Welcome! Please identify yourself.'
+    }));
 
-  ws.on('close', () => {
-    console.log(`Client disconnected: ${ws.clientId}`);
-    clients.delete(ws);
-  });
+    ws.on('message', (message) => {
+        const textMessage = message.toString();
+        
+        try {
+            const parsedMessage = JSON.parse(textMessage);
 
-  ws.on('error', (error) => {
-    console.error(`WebSocket error for ${ws.clientId}:`, error);
-    clients.delete(ws); // Remove client on error
-  });
+            // --- Handle Identification ---
+            if (parsedMessage.type === 'identification') {
+                const oldId = ws.clientId;
+                ws.clientId = parsedMessage.sender; // Set the permanent ID from the client's message
+                ws.isIdentified = true;
+                console.log(`Client ${oldId} identified as: ${ws.clientId}`);
+
+                // Announce to everyone that this user has joined
+                const joinMessage = JSON.stringify({
+                    type: 'system',
+                    sender: 'server',
+                    content: `${ws.clientId} has connected.`
+                });
+                for (const client of clients) {
+                    if (client.readyState === WebSocket.OPEN) {
+                        client.send(joinMessage);
+                    }
+                }
+                return; // Stop processing this specific message
+            }
+            
+            // --- Standard Message Processing for Identified Clients ---
+            if (!ws.isIdentified) {
+                console.log(`Ignoring message from unidentified client ${ws.clientId}`);
+                return;
+            }
+
+            // Log the raw message from an identified client
+            console.log(`Raw message received from ${ws.clientId}:`, textMessage);
+
+            // Assign sender if not provided by the client (fallback)
+            parsedMessage.sender = parsedMessage.sender || ws.clientId;
+            parsedMessage.timestamp = Date.now();
+
+            let messageToSend = null;
+            let broadcast = true;
+            let logSpecific = true;
+
+            // --- Specific Message Type Handling ---
+            if (parsedMessage.type === 'action' && parsedMessage.action === 'GOTO') {
+                console.log(`>>> Received GOTO command from ${parsedMessage.sender} for X:${parsedMessage.data?.x} Y:${parsedMessage.data?.y} Z:${parsedMessage.data?.z}`);
+                messageToSend = JSON.stringify(parsedMessage);
+                logSpecific = false;
+
+            } else if (parsedMessage.type === 'action_response' && parsedMessage.action === 'look') {
+                console.log(`>>> Received LOOK action response from ${parsedMessage.sender}.`);
+                console.log(`    Status: ${parsedMessage.status}, Looking At: ${parsedMessage.looking_at}`);
+                messageToSend = JSON.stringify(parsedMessage);
+                logSpecific = false;
+
+            } else if (parsedMessage.type === 'action_response' && parsedMessage.action === 'look_manual') {
+                console.log(`>>> Received LOOK_MANUAL action response from ${parsedMessage.sender}.`);
+                console.log(`    Status: ${parsedMessage.status}, Looking At Coords: (Yaw: ${parsedMessage.looking_at_yaw}, Pitch: ${parsedMessage.looking_at_pitch})`);
+                messageToSend = JSON.stringify(parsedMessage);
+                logSpecific = false;
+
+            } else if (parsedMessage.type === 'doorLocations') {
+                const doorCount = Array.isArray(parsedMessage.doors) ? parsedMessage.doors.length : 0;
+                console.log(`>>> Received doorLocations update from ${parsedMessage.sender} (${doorCount} doors)`);
+                messageToSend = JSON.stringify(parsedMessage);
+                logSpecific = false;
+
+            } else {
+                // Handle other standard messages (chat, system, etc.)
+                messageToSend = JSON.stringify(parsedMessage);
+            }
+
+            if(logSpecific) {
+                console.log(`Processing message from ${parsedMessage.sender}:`, parsedMessage);
+            }
+
+            if (broadcast && messageToSend) {
+                for (const client of clients) {
+                    if (client.readyState === WebSocket.OPEN) {
+                        client.send(messageToSend);
+                    }
+                }
+            }
+
+        } catch (e) {
+            console.error(`Invalid JSON received from ${ws.clientId}:`, textMessage, e);
+        }
+    });
+
+    ws.on('close', () => {
+        console.log(`Client disconnected: ${ws.clientId}`);
+        clients.delete(ws);
+        
+        // Announce disconnection to other clients if the client was identified
+        if (ws.isIdentified) {
+            const leaveMessage = JSON.stringify({
+                type: 'system',
+                sender: 'server',
+                content: `${ws.clientId} has disconnected.`
+            });
+            for (const client of clients) {
+                 if (client.readyState === WebSocket.OPEN) {
+                     client.send(leaveMessage);
+                 }
+            }
+        }
+    });
+
+    ws.on('error', (error) => {
+        console.error(`WebSocket error for ${ws.clientId}:`, error);
+        clients.delete(ws);
+    });
 });
