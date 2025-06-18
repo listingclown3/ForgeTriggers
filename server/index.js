@@ -11,7 +11,6 @@ wss.on('connection', (ws) => {
     // Assign a temporary ID until the client identifies itself
     ws.clientId = `pending_${nextClientId++}`;
     ws.isIdentified = false;
-    console.log(`New connection opened: ${ws.clientId}`);
     clients.add(ws);
 
     // Send a standard welcome message to the newly connected client
@@ -29,10 +28,9 @@ wss.on('connection', (ws) => {
 
             // --- Handle Identification ---
             if (parsedMessage.type === 'identification') {
-                const oldId = ws.clientId;
                 ws.clientId = parsedMessage.sender; // Set the permanent ID from the client's message
                 ws.isIdentified = true;
-                console.log(`Client ${oldId} identified as: ${ws.clientId}`);
+                console.log(`${ws.clientId} has connected`);
 
                 // Announce to everyone that this user has joined
                 const joinMessage = JSON.stringify({
